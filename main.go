@@ -32,7 +32,7 @@ import (
 
 func main() {
 	log.SetFlags(0)
-	args := runArgs{region: "us-east-1"}
+	args := runArgs{region: "us-east-1", maxLoadPct: 100}
 	flag.StringVar(&args.region, "region", args.region,
 		"use prices for this AWS `region`")
 	flag.StringVar(&args.input, "redises", "",
@@ -43,6 +43,7 @@ func main() {
 		"take into account old generation instance types")
 	flag.BoolVar(&args.anyFamily, "any-family", args.anyFamily,
 		"take into account all instance families, not only memory-optimized")
+	flag.IntVar(&args.maxLoadPct, "max-load", args.maxLoadPct, "target this `percent` memory utilization, [1,100] range")
 	flag.Parse()
 	if err := run(args); err != nil {
 		os.Stderr.WriteString(err.Error() + "\n")
@@ -56,6 +57,7 @@ type runArgs struct {
 	html       string
 	withOldGen bool
 	anyFamily  bool
+	maxLoadPct int
 }
 
 func (args runArgs) validate() error {
@@ -64,6 +66,9 @@ func (args runArgs) validate() error {
 	}
 	if args.input == "" {
 		return errors.New("input file must be set")
+	}
+	if args.maxLoadPct < 1 || args.maxLoadPct > 100 {
+		return errors.New("max-load must be in [1,100] percent range")
 	}
 	return nil
 }
@@ -215,11 +220,11 @@ func run(args runArgs) error {
 
 	rows := make([]row, 0, len(redisesInfo))
 	for _, ri := range redisesInfo {
-		plan1, err := offerings.match(ri.UsedBytes)
+		plan1, err := offerings.match(ri.UsedBytes, args.maxLoadPct)
 		if err != nil {
 			return fmt.Errorf("no matching plad for %q with %d GiB of used memory: %w", ri.Addr, ri.UsedBytes<<30, err)
 		}
-		plan2, err := offerings.match(ri.PeakBytes)
+		plan2, err := offerings.match(ri.PeakBytes, args.maxLoadPct)
 		if err != nil {
 			return fmt.Errorf("no matching plad for %q with %d GiB of peak memory: %w", ri.Addr, ri.PeakBytes<<30, err)
 		}
@@ -251,7 +256,8 @@ func run(args runArgs) error {
 		PeakBasedTotal float64
 		Time           time.Time
 		Region         string
-	}{Rows: rows, Time: time.Now().UTC(), Region: region.Description()}
+		MaxLoad        int
+	}{Rows: rows, Time: time.Now().UTC(), Region: region.Description(), MaxLoad: args.maxLoadPct}
 	for _, row := range rows {
 		page.UsedBasedTotal += row.UsedBased.PricePerMonth()
 		page.PeakBasedTotal += row.PeakBased.PricePerMonth()
@@ -269,8 +275,8 @@ func (ofs Offerings) sortByMemory() {
 	sort.Slice(ofs, func(i, j int) bool { return ofs[i].Memory < ofs[j].Memory })
 }
 
-func (ofs Offerings) match(size uint64) (Offering, error) {
-	i := sort.Search(len(ofs), func(i int) bool { return ofs[i].Memory >= size })
+func (ofs Offerings) match(size uint64, maxLoadPct int) (Offering, error) {
+	i := sort.Search(len(ofs), func(i int) bool { return ofs[i].Memory/100*uint64(maxLoadPct) >= size })
 	if i < len(ofs) {
 		return ofs[i], nil
 	}
@@ -424,7 +430,8 @@ var pageTemplate = template.Must(template.New("page").Parse(`<!doctype html><hea
 <body>
 <table>
 <caption>Estimate on ElastiCache instances required to cover Redis instances<br>
-based on memory readings from {{.Time.Format "2006-01-02 15:04"}} UTC,<br>
+based on memory readings from {{.Time.Format "2006-01-02 15:04"}} UTC,
+using {{.MaxLoad}}% max memory load target,<br>
 prices are for on-demand nodes in {{.Region}} region
 </caption>
 <thead>
