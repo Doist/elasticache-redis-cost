@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/csv"
 	"errors"
 	"flag"
 	"fmt"
@@ -43,6 +44,7 @@ func main() {
 		"take into account old generation instance types")
 	flag.BoolVar(&args.anyFamily, "any-family", args.anyFamily,
 		"take into account all instance families, not only memory-optimized")
+	flag.BoolVar(&args.csv, "csv", args.csv, "print report in CVS instead of formatted text")
 	flag.IntVar(&args.maxLoadPct, "max-load", args.maxLoadPct, "target this `percent` memory utilization, [1,100] range")
 	flag.Parse()
 	if err := run(args); err != nil {
@@ -57,6 +59,7 @@ type runArgs struct {
 	html       string
 	withOldGen bool
 	anyFamily  bool
+	csv        bool
 	maxLoadPct int
 }
 
@@ -210,15 +213,7 @@ func run(args runArgs) error {
 		return err
 	}
 
-	type row struct {
-		Redis     RedisStats
-		UsedRatio float64
-		PeakRatio float64
-		UsedBased Offering
-		PeakBased Offering
-	}
-
-	rows := make([]row, 0, len(redisesInfo))
+	rows := make([]reportRow, 0, len(redisesInfo))
 	for _, ri := range redisesInfo {
 		plan1, err := offerings.match(ri.UsedBytes, args.maxLoadPct)
 		if err != nil {
@@ -228,7 +223,7 @@ func run(args runArgs) error {
 		if err != nil {
 			return fmt.Errorf("no matching plad for %q with %d GiB of peak memory: %w", ri.Addr, ri.PeakBytes<<30, err)
 		}
-		rows = append(rows, row{
+		rows = append(rows, reportRow{
 			Redis:     ri,
 			UsedRatio: float64(ri.UsedBytes) / float64(plan1.Memory) * 100,
 			PeakRatio: float64(ri.PeakBytes) / float64(plan2.Memory) * 100,
@@ -237,21 +232,13 @@ func run(args runArgs) error {
 		})
 	}
 	if args.html == "" {
-		tw := tabwriter.NewWriter(os.Stdout, 1, 4, 1, ' ', 0)
-		defer tw.Flush()
-		fmt.Fprintf(tw, "HOST\tUSED(LOAD)\tTYPE\t$/HR\t$/MONTH\tPEAK(LOAD)\tTYPE\t$/HR\t$/MONTH\t\n")
-		for _, row := range rows {
-			fmt.Fprintf(tw, "%s\t%.1f (%.1f%%)\t%s\t%.3f\t%.3f\t%.1f (%.1f%%)\t%s\t%.3f\t%.3f\t\n", row.Redis.Addr,
-				row.Redis.UsedGiB(), row.UsedRatio,
-				row.UsedBased.InstanceType, row.UsedBased.PricePerHour, row.UsedBased.PricePerMonth(),
-				row.Redis.PeakGiB(), row.PeakRatio,
-				row.PeakBased.InstanceType, row.PeakBased.PricePerHour, row.PeakBased.PricePerMonth(),
-			)
+		if args.csv {
+			return writeCSVReport(os.Stdout, rows)
 		}
-		return nil
+		return writeTextReport(os.Stdout, rows)
 	}
 	page := struct {
-		Rows           []row
+		Rows           []reportRow
 		UsedBasedTotal float64
 		PeakBasedTotal float64
 		Time           time.Time
@@ -305,6 +292,14 @@ type RedisStats struct {
 
 func (s RedisStats) UsedGiB() float64 { return float64(s.UsedBytes>>20) / 1024 }
 func (s RedisStats) PeakGiB() float64 { return float64(s.PeakBytes>>20) / 1024 }
+
+type reportRow struct {
+	Redis     RedisStats
+	UsedRatio float64
+	PeakRatio float64
+	UsedBased Offering
+	PeakBased Offering
+}
 
 var queryPrice = jmespath.MustCompile("OnDemand.*[].priceDimensions.*[].pricePerUnit.USD | [0]")
 var queryIstanceType = jmespath.MustCompile("attributes.instanceType")
@@ -410,6 +405,52 @@ func readAddresses(rd io.Reader) ([]string, error) {
 		out = append(out, line)
 	}
 	return out, scanner.Err()
+}
+
+func writeTextReport(w io.Writer, rows []reportRow) error {
+	tw := tabwriter.NewWriter(w, 1, 4, 1, ' ', 0)
+	defer tw.Flush()
+	fmt.Fprintf(tw, "HOST\tUSED(LOAD)\tTYPE\t$/HR\t$/MONTH\tPEAK(LOAD)\tTYPE\t$/HR\t$/MONTH\t\n")
+	for _, row := range rows {
+		fmt.Fprintf(tw, "%s\t%.1f (%.1f%%)\t%s\t%.3f\t%.3f\t%.1f (%.1f%%)\t%s\t%.3f\t%.3f\t\n", row.Redis.Addr,
+			row.Redis.UsedGiB(), row.UsedRatio,
+			row.UsedBased.InstanceType, row.UsedBased.PricePerHour, row.UsedBased.PricePerMonth(),
+			row.Redis.PeakGiB(), row.PeakRatio,
+			row.PeakBased.InstanceType, row.PeakBased.PricePerHour, row.PeakBased.PricePerMonth(),
+		)
+	}
+	return tw.Flush()
+}
+
+func writeCSVReport(w io.Writer, rows []reportRow) error {
+	wr := csv.NewWriter(w)
+	defer wr.Flush()
+	csvRow := []string{"host",
+		"used memory (gib)", "instance type (use-based)",
+		"instance memory (use-based)", "usd/month (use-based)",
+		"peak memory (gib)", "instance type (peak-based)",
+		"instance memory (peak-based)", "usd/month (peak-based)",
+	}
+	if err := wr.Write(csvRow); err != nil {
+		return err
+	}
+	for _, row := range rows {
+		csvRow = append(csvRow[:0], row.Redis.Addr,
+			strconv.FormatFloat(row.Redis.UsedGiB(), 'f', 2, 64),
+			row.UsedBased.InstanceType,
+			strconv.FormatFloat(row.UsedBased.MemoryGiB(), 'f', 2, 64),
+			strconv.FormatFloat(row.UsedBased.PricePerMonth(), 'f', 3, 64),
+			strconv.FormatFloat(row.Redis.PeakGiB(), 'f', 2, 64),
+			row.PeakBased.InstanceType,
+			strconv.FormatFloat(row.PeakBased.MemoryGiB(), 'f', 2, 64),
+			strconv.FormatFloat(row.PeakBased.PricePerMonth(), 'f', 3, 64),
+		)
+		if err := wr.Write(csvRow); err != nil {
+			return err
+		}
+	}
+	wr.Flush()
+	return wr.Error()
 }
 
 var pageTemplate = template.Must(template.New("page").Parse(`<!doctype html><head><meta charset="utf-8">
