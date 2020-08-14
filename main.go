@@ -16,6 +16,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -33,25 +34,32 @@ import (
 
 func main() {
 	log.SetFlags(0)
-	args := runArgs{region: "us-east-1", maxLoadPct: 80}
+	args := runArgs{
+		region:     "us-east-1",
+		maxLoadPct: 80,
+		resMemPct:  defaultReservedMemoryPercent,
+	}
 	flag.StringVar(&args.region, "region", args.region,
 		"use prices for this AWS `region`")
 	flag.StringVar(&args.input, "redises", "",
 		"`path` to file with Redis addresses, one per line (/dev/stdin to read from stdin)")
 	flag.StringVar(&args.html, "html", args.html,
-		"`path` to HTML file to save report; if empty, text-only report is printed to stdout")
+		"`path` to HTML file to save report; if empty, text report is printed to stdout")
 	flag.BoolVar(&args.withOldGen, "any-generation", args.withOldGen,
 		"take into account old generation instance types")
 	flag.BoolVar(&args.anyFamily, "any-family", args.anyFamily,
 		"take into account all instance families, not only memory-optimized")
 	flag.BoolVar(&args.csv, "csv", args.csv, "print report in CVS instead of formatted text")
-	flag.IntVar(&args.maxLoadPct, "max-load", args.maxLoadPct, "target this `percent` memory utilization, [1,100] range")
+	flag.IntVar(&args.maxLoadPct, "max-load", args.maxLoadPct, "source dataset must fit this percent maxmemory utilization of the target, [1,100] range")
+	flag.IntVar(&args.resMemPct, "reserved-memory-percent", args.resMemPct, "value of reserved-memory-percent ElastiCache parameter, [0,100] range")
 	flag.Parse()
 	if err := run(args); err != nil {
 		os.Stderr.WriteString(err.Error() + "\n")
 		os.Exit(1)
 	}
 }
+
+const defaultReservedMemoryPercent = 25
 
 type runArgs struct {
 	region     string
@@ -61,6 +69,7 @@ type runArgs struct {
 	anyFamily  bool
 	csv        bool
 	maxLoadPct int
+	resMemPct  int // reserved-memory-percent
 }
 
 func (args runArgs) validate() error {
@@ -72,6 +81,9 @@ func (args runArgs) validate() error {
 	}
 	if args.maxLoadPct < 1 || args.maxLoadPct > 100 {
 		return errors.New("max-load must be in [1,100] percent range")
+	}
+	if args.resMemPct < 0 || args.resMemPct > 100 {
+		return errors.New("reserved-memory-percent must be in [0,100] range")
 	}
 	return nil
 }
@@ -85,9 +97,12 @@ func run(args runArgs) error {
 	if !ok {
 		return fmt.Errorf("unsupported region %q", args.region)
 	}
-	if args.maxLoadPct >= 85 {
-		log.Println("max-load is over 85%, please read about reserved-memory-percent parameter:\n" +
-			"https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/ParameterGroups.Redis.html#ParameterGroups.Redis.3-2-4.New")
+	if args.maxLoadPct >= 90 {
+		log.Println("please make sure you understand available memory on ElastiCache Redis:\n" +
+			"https://aws.amazon.com/premiumsupport/knowledge-center/available-memory-elasticache-redis-node/")
+	}
+	if args.resMemPct < defaultReservedMemoryPercent {
+		log.Println("please make sure you understand how reserved-memory-percent parameter works")
 	}
 
 	f, err := os.Open(args.input)
@@ -197,11 +212,12 @@ func run(args runArgs) error {
 				return err
 			}
 			if mem, ok := maxmemoryValues[instanceType]; ok {
-				memory = mem
+				memory = mem - (mem / 100 * uint64(args.resMemPct))
 			} else {
-				memory = memory / 4 * 3 // maxmemory is 75% of total mem
-				log.Printf("maxmemory value for instance %q is unknown,"+
-					" using default as 75%% of instance size", instanceType)
+				memory = memory - (memory / 100 * uint64(args.resMemPct))
+				log.Printf("exact maxmemory value for instance %q is unknown,"+
+					" using instance size corrected to reserved-memory-percent=%d",
+					instanceType, args.resMemPct)
 			}
 			offerings = append(offerings, Offering{
 				Memory:       memory,
@@ -242,13 +258,20 @@ func run(args runArgs) error {
 		return writeTextReport(os.Stdout, rows)
 	}
 	page := struct {
-		Rows           []reportRow
-		UsedBasedTotal float64
-		PeakBasedTotal float64
-		Time           time.Time
-		Region         string
-		MaxLoad        int
-	}{Rows: rows, Time: time.Now().UTC(), Region: region.Description(), MaxLoad: args.maxLoadPct}
+		Rows                  []reportRow
+		UsedBasedTotal        float64
+		PeakBasedTotal        float64
+		Time                  time.Time
+		Region                string
+		MaxLoad               int
+		ReservedMemoryPercent int
+	}{
+		Rows:                  rows,
+		Time:                  time.Now().UTC(),
+		Region:                region.Description(),
+		MaxLoad:               args.maxLoadPct,
+		ReservedMemoryPercent: args.resMemPct,
+	}
 	for _, row := range rows {
 		page.UsedBasedTotal += row.UsedBased.PricePerMonth()
 		page.PeakBasedTotal += row.PeakBased.PricePerMonth()
@@ -457,6 +480,30 @@ func writeCSVReport(w io.Writer, rows []reportRow) error {
 	return wr.Error()
 }
 
+func init() {
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage of %s:\n", filepath.Base(os.Args[0]))
+		flag.PrintDefaults()
+		fmt.Fprintln(flag.CommandLine.Output(), reservedMemoryPercentNote)
+	}
+}
+
+const reservedMemoryPercentNote = `
+Please see AWS documentation regarding reserved-memory-percent if you decide to change it:
+
+https://aws.amazon.com/premiumsupport/knowledge-center/available-memory-elasticache-redis-node/
+https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/ParameterGroups.Redis.html#ParameterGroups.Redis.3-2-4.New
+
+> The percent of a node's memory reserved for nondata use. By default, the
+> Redis data footprint grows until it consumes all of the node's memory. If
+> this occurs, then node performance will likely suffer due to excessive
+> memory paging. By reserving memory, you can set aside some of the available
+> memory for non-Redis purposes to help reduce the amount of paging.
+
+> This parameter is specific to ElastiCache, and is not part of the standard
+> Redis distribution.
+`
+
 var pageTemplate = template.Must(template.New("page").Parse(`<!doctype html><head><meta charset="utf-8">
 <title>Redis instances matched to ElastiCache Redis instances</title>
 <style>
@@ -469,6 +516,7 @@ var pageTemplate = template.Must(template.New("page").Parse(`<!doctype html><hea
 	tr:nth-child(even) td {background-color: #f8f8f8;}
 	tr:hover td {background-color: #eee;}
 	.right {text-align: right;}
+	.warn {text-color: darkred;}
 	tfoot td {font-weight: bold;}
 	#footnote {max-width:50em;}
 </style>
@@ -476,8 +524,9 @@ var pageTemplate = template.Must(template.New("page").Parse(`<!doctype html><hea
 <body>
 <table>
 <caption>Estimate on ElastiCache instances required to cover Redis instances<br>
-based on memory readings from {{.Time.Format "2006-01-02 15:04"}} UTC,
-using {{.MaxLoad}}% <a href="#footnote">max memory load target</a><sup>*</sup>,<br>
+based on memory readings from {{.Time.Format "2006-01-02 15:04"}} UTC,<br>
+using {{.MaxLoad}}% <a href="#footnote">max memory load target</a><sup>*</sup>
+and <code>reserved-memory-percent={{.ReservedMemoryPercent}}</code>,<br>
 prices are for on-demand nodes in {{.Region}} region
 </caption>
 <thead>
@@ -513,13 +562,13 @@ prices are for on-demand nodes in {{.Region}} region
 	<!-- based on used memory -->
 	<td>{{.UsedBased.InstanceType}}</td>
 	<td class="right">{{printf "%.1f" .UsedBased.MemoryGiB}}</td>
-	<td class="right">{{if ge .UsedRatio 85.0}}<a href="#footnote">{{printf "%.1f" .UsedRatio}}</a>{{else}}{{printf "%.1f" .UsedRatio}}{{end}}</td>
+	<td class="right{{if ge .UsedRatio 95.0}} warn{{end}}">{{printf "%.1f" .UsedRatio}}</td>
 	<td class="right">{{printf "%.3f" .UsedBased.PricePerHour}}</td>
 	<td class="right">{{printf "%.3f" .UsedBased.PricePerMonth}}</td>
 	<!-- based on peak memory -->
 	<td>{{.PeakBased.InstanceType}}</td>
 	<td class="right">{{printf "%.1f" .PeakBased.MemoryGiB}}</td>
-	<td class="right">{{if ge .PeakRatio 85.0}}<a href="#footnote">{{printf "%.1f" .PeakRatio}}</a>{{else}}{{printf "%.1f" .PeakRatio}}{{end}}</td>
+	<td class="right{{if ge .PeakRatio 95.0}} warn{{end}}">{{printf "%.1f" .PeakRatio}}</td>
 	<td class="right">{{printf "%.3f" .PeakBased.PricePerHour}}</td>
 	<td class="right">{{printf "%.3f" .PeakBased.PricePerMonth}}</td>
 </tr>
@@ -536,8 +585,8 @@ prices are for on-demand nodes in {{.Region}} region
 </tfoot>
 </table>
 <footer><p id="footnote"><sup>*</sup> Node sizes displays
-<code>maxmemory</code> available for Redis data, taken from
-<a href="https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/ParameterGroups.Redis.html#ParameterGroups.Redis.NodeSpecific">node-specific list of maxmemory values</a>. Please note that real Redis <strong>memory available for user data is by default 25% lower than node size shown</strong>, see documentation on ElastiCache-specific <a href="https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/ParameterGroups.Redis.html#ParameterGroups.Redis.3-2-4.New"><code>reserved-memory-percent</code> parameter</a>.
+<code>maxmemory</code> target Redis values, derived from
+<a href="https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/ParameterGroups.Redis.html#ParameterGroups.Redis.NodeSpecific">node-specific list of maxmemory values</a>, corrected to ElastiCache-specific <a href="https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/ParameterGroups.Redis.html#ParameterGroups.Redis.3-2-4.New"><code>reserved-memory-percent={{.ReservedMemoryPercent}}</code> parameter</a>.
 </p></footer>
 </body>
 `))
