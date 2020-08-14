@@ -33,7 +33,7 @@ import (
 
 func main() {
 	log.SetFlags(0)
-	args := runArgs{region: "us-east-1", maxLoadPct: 100}
+	args := runArgs{region: "us-east-1", maxLoadPct: 80}
 	flag.StringVar(&args.region, "region", args.region,
 		"use prices for this AWS `region`")
 	flag.StringVar(&args.input, "redises", "",
@@ -84,6 +84,10 @@ func run(args runArgs) error {
 	region, ok := endpoints.AwsPartition().Regions()[args.region]
 	if !ok {
 		return fmt.Errorf("unsupported region %q", args.region)
+	}
+	if args.maxLoadPct >= 85 {
+		log.Println("max-load is over 85%, please read about reserved-memory-percent parameter:\n" +
+			"https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/ParameterGroups.Redis.html#ParameterGroups.Redis.3-2-4.New")
 	}
 
 	f, err := os.Open(args.input)
