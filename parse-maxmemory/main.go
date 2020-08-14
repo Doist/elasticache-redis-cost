@@ -69,7 +69,7 @@ func run(outputFile string) error {
 	return ioutil.WriteFile(outputFile, formatted, 0666)
 }
 
-const tableID = "w290aac18c46c51c49b7"
+const tableID = "w293aac18c46c51c49b7"
 
 func processDoc(doc *html.Node) ([]nodeInfo, error) {
 	var out []nodeInfo
