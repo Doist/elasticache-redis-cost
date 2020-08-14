@@ -221,11 +221,11 @@ func run(args runArgs) error {
 	for _, ri := range redisesInfo {
 		plan1, err := offerings.match(ri.UsedBytes, args.maxLoadPct)
 		if err != nil {
-			return fmt.Errorf("no matching plad for %q with %d GiB of used memory: %w", ri.Addr, ri.UsedBytes<<30, err)
+			return fmt.Errorf("no matching plan for %q with %d GiB of used memory: %w", ri.Addr, ri.UsedBytes<<30, err)
 		}
 		plan2, err := offerings.match(ri.PeakBytes, args.maxLoadPct)
 		if err != nil {
-			return fmt.Errorf("no matching plad for %q with %d GiB of peak memory: %w", ri.Addr, ri.PeakBytes<<30, err)
+			return fmt.Errorf("no matching plan for %q with %d GiB of peak memory: %w", ri.Addr, ri.PeakBytes<<30, err)
 		}
 		rows = append(rows, reportRow{
 			Redis:     ri,
