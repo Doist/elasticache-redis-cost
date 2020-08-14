@@ -1,7 +1,7 @@
 # elasticache-redis-cost
 
-Command elasticache-redis-cost suggests AWS ElastiCache instance types that can
-fit existing Redis instances.
+Command elasticache-redis-cost suggests AWS ElastiCache for Redis instance
+types that can fit existing Redis instances.
 
     Usage of elasticache-redis-cost:
       -any-family
@@ -34,3 +34,27 @@ fit existing Redis instances.
     
     > This parameter is specific to ElastiCache, and is not part of the standard
     > Redis distribution.
+
+## AWS Environment
+
+This tool uses AWS SDK, please make sure you have AWS credentials available:
+<https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-quickstart.html>.
+
+Program only accesses [GetProducts] pricing API endpoint, either use
+`AWSPriceListServiceFullAccess` AWS managed policy, or create an explicit
+policy:
+
+    {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Action": [
+                    "pricing:GetProducts"
+                ],
+                "Effect": "Allow",
+                "Resource": "*"
+            }
+        ]
+    }
+
+[GetProducts]: https://docs.aws.amazon.com/aws-cost-management/latest/APIReference/API_pricing_GetProducts.html
