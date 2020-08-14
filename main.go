@@ -470,13 +470,14 @@ var pageTemplate = template.Must(template.New("page").Parse(`<!doctype html><hea
 	tr:hover td {background-color: #eee;}
 	.right {text-align: right;}
 	tfoot td {font-weight: bold;}
+	#footnote {max-width:50em;}
 </style>
 </head>
 <body>
 <table>
 <caption>Estimate on ElastiCache instances required to cover Redis instances<br>
 based on memory readings from {{.Time.Format "2006-01-02 15:04"}} UTC,
-using {{.MaxLoad}}% max memory load target,<br>
+using {{.MaxLoad}}% <a href="#footnote">max memory load target</a><sup>*</sup>,<br>
 prices are for on-demand nodes in {{.Region}} region
 </caption>
 <thead>
@@ -512,13 +513,13 @@ prices are for on-demand nodes in {{.Region}} region
 	<!-- based on used memory -->
 	<td>{{.UsedBased.InstanceType}}</td>
 	<td class="right">{{printf "%.1f" .UsedBased.MemoryGiB}}</td>
-	<td class="right">{{printf "%.1f" .UsedRatio}}</td>
+	<td class="right">{{if ge .UsedRatio 85.0}}<a href="#footnote">{{printf "%.1f" .UsedRatio}}</a>{{else}}{{printf "%.1f" .UsedRatio}}{{end}}</td>
 	<td class="right">{{printf "%.3f" .UsedBased.PricePerHour}}</td>
 	<td class="right">{{printf "%.3f" .UsedBased.PricePerMonth}}</td>
 	<!-- based on peak memory -->
 	<td>{{.PeakBased.InstanceType}}</td>
 	<td class="right">{{printf "%.1f" .PeakBased.MemoryGiB}}</td>
-	<td class="right">{{printf "%.1f" .PeakRatio}}</td>
+	<td class="right">{{if ge .PeakRatio 85.0}}<a href="#footnote">{{printf "%.1f" .PeakRatio}}</a>{{else}}{{printf "%.1f" .PeakRatio}}{{end}}</td>
 	<td class="right">{{printf "%.3f" .PeakBased.PricePerHour}}</td>
 	<td class="right">{{printf "%.3f" .PeakBased.PricePerMonth}}</td>
 </tr>
@@ -536,7 +537,7 @@ prices are for on-demand nodes in {{.Region}} region
 </table>
 <footer><p id="footnote"><sup>*</sup> Node sizes displays
 <code>maxmemory</code> available for Redis data, taken from
-<a href="https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/ParameterGroups.Redis.html#ParameterGroups.Redis.NodeSpecific">https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/ParameterGroups.Redis.html#ParameterGroups.Redis.NodeSpecific</a>.
+<a href="https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/ParameterGroups.Redis.html#ParameterGroups.Redis.NodeSpecific">node-specific list of maxmemory values</a>. Please note that real Redis <strong>memory available for user data is by default 25% lower than node size shown</strong>, see documentation on ElastiCache-specific <a href="https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/ParameterGroups.Redis.html#ParameterGroups.Redis.3-2-4.New"><code>reserved-memory-percent</code> parameter</a>.
 </p></footer>
 </body>
 `))
